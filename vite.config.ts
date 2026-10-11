@@ -1,3 +1,6 @@
 import { defineConfig } from 'vite'
 
-export default defineConfig({ define: { global: {} } })
+export default defineConfig({
+	base: '/kalabilab_livecoding/',
+	define: { global: {} },
+})
