@@ -50,6 +50,15 @@ button.accent {
   border-color: var(--sage);
   color: var(--paper);
 }
+button.recording {
+  background: #8d3130;
+  border-color: #8d3130;
+  color: var(--paper);
+  animation: recording-pulse 1s steps(2, end) infinite;
+}
+@keyframes recording-pulse {
+  50% { opacity: 0.6; }
+}
 .topbar {
   min-height: 88px;
   border-bottom: var(--line) solid var(--ink);

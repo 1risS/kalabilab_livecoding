@@ -17,7 +17,7 @@ const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
 <div class="start-screen" id="start-screen"><div><img src="${assetBase}logo-kalabi.webp" alt="Símbolo Kalabi Lab"><strong>HAZ CLIC PARA INICIAR AUDIO + VIDEO</strong><small>EL NAVEGADOR REQUIERE UNA ACCIÓN DEL USUARIO</small></div></div>
 <canvas id="hydra-canvas" aria-label="Visual de Hydra"></canvas>
-<header class="topbar"><div class="brand"><img src="${assetBase}logo-kalabi.webp" alt="Kalabi Lab"><div><b>kalabi lab</b><em>FORMACIÓN EN ARTE, TECNOLOGÍA Y MATERIA</em></div></div><nav class="toolbar"><button id="run-all" class="accent run-all">EJECUTAR</button><button id="upload-samples">SUBIR SAMPLES</button><button id="upload-image">SUBIR IMAGEN</button><button id="upload-video">SUBIR VIDEO</button><button id="gist">GISTS</button><button id="toggle-editors">OCULTAR EDITORES</button><button id="fullscreen">PANTALLA COMPLETA</button></nav></header>
+<header class="topbar"><div class="brand"><img src="${assetBase}logo-kalabi.webp" alt="Kalabi Lab"><div><b>kalabi lab</b><em>FORMACIÓN EN ARTE, TECNOLOGÍA Y MATERIA</em></div></div><nav class="toolbar"><button id="run-all" class="accent run-all">EJECUTAR</button><button id="upload-samples">SUBIR SAMPLES</button><button id="upload-image">SUBIR IMAGEN</button><button id="upload-video">SUBIR VIDEO</button><button id="record">GRABAR MP4</button><button id="gist">GISTS</button><button id="toggle-editors">OCULTAR EDITORES</button><button id="fullscreen">PANTALLA COMPLETA</button></nav></header>
 <input id="samples-input" type="file" accept="audio/*" multiple hidden><input id="image-input" type="file" accept="image/*" hidden><input id="video-input" type="file" accept="video/*" hidden>
 <main id="workbench"><section class="pane" id="strudel-pane"><div class="pane-head"><b>01 / STRUDEL</b><span id="audio-status">LISTO</span></div><div class="editor" id="strudel-editor"></div><pre class="errors" id="strudel-errors"></pre></section><div class="divider" id="divider" role="separator" aria-label="Cambiar el tamaño de los editores"></div><section class="pane hydra-pane" id="hydra-pane"><div class="pane-head"><b>02 / HYDRA</b><span id="visual-status">LISTO</span></div><div class="editor" id="hydra-editor"></div><pre class="errors" id="hydra-errors"></pre></section></main>`
 
@@ -30,6 +30,8 @@ let hydra: Hydra
 let hydraInitialized = false
 let analyser: AnalyserNode | undefined
 let strudelReady = false
+let recorder: MediaRecorder | undefined
+let recordingStream: MediaStream | undefined
 let latestEvent: StrudelEvent | null = null
 const events: StrudelEvent[] = []
 const listeners = new Set<(event: StrudelEvent) => void>()
@@ -198,6 +200,50 @@ async function createGist() {
     window.open(gist.html_url, '_blank', 'noopener')
   } catch (error) { console.error('[Gists]', error); window.alert(`No se pudo crear el Gist: ${error instanceof Error ? error.message : String(error)}`) }
 }
+function supportedRecordingMimeType() {
+  return ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    .find((type) => MediaRecorder.isTypeSupported(type))
+}
+async function toggleRecording() {
+  const button = document.querySelector<HTMLButtonElement>('#record')!
+  if (recorder?.state === 'recording') {
+    recorder.stop()
+    return
+  }
+  try {
+    initializeHydra()
+    await getAudioContext().resume()
+    const videoStream = canvas.captureStream(60)
+    const destination = getAudioContext().createMediaStreamDestination()
+    const output = (getSuperdoughAudioController() as any).output?.destinationGain
+    if (output) output.connect(destination)
+    recordingStream = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()])
+    const mimeType = supportedRecordingMimeType()
+    if (!mimeType) throw new Error('Este navegador no puede codificar una grabación de video.')
+    const chunks: BlobPart[] = []
+    recorder = new MediaRecorder(recordingStream, { mimeType, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 192_000 })
+    recorder.addEventListener('dataavailable', (event) => { if (event.data.size) chunks.push(event.data) })
+    recorder.addEventListener('stop', () => {
+      const extension = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm'
+      const blob = new Blob(chunks, { type: mimeType })
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `kalabi-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`
+      link.click()
+      URL.revokeObjectURL(link.href)
+      recordingStream?.getTracks().forEach((track) => track.stop())
+      recordingStream = undefined
+      recorder = undefined
+      button.textContent = 'GRABAR MP4'
+      button.classList.remove('recording')
+    })
+    recorder.start(1000)
+    button.textContent = 'DETENER GRABACIÓN'
+    button.classList.add('recording')
+  } catch (error) {
+    showError('hydra', error)
+  }
+}
 document.querySelector('#run-all')!.addEventListener('click', () => runAll())
 document.querySelector('#upload-samples')!.addEventListener('click', () => document.querySelector<HTMLInputElement>('#samples-input')!.click())
 document.querySelector('#upload-image')!.addEventListener('click', () => document.querySelector<HTMLInputElement>('#image-input')!.click())
@@ -206,6 +252,7 @@ document.querySelector('#samples-input')!.addEventListener('change', (event) => 
 document.querySelector('#image-input')!.addEventListener('change', (event) => uploadVisual((event.currentTarget as HTMLInputElement).files?.[0], 'imagen'))
 document.querySelector('#video-input')!.addEventListener('change', (event) => uploadVisual((event.currentTarget as HTMLInputElement).files?.[0], 'video'))
 document.querySelector('#gist')!.addEventListener('click', () => createGist())
+document.querySelector('#record')!.addEventListener('click', () => void toggleRecording())
 document.querySelector('#toggle-editors')!.addEventListener('click', (event) => {
   document.body.classList.toggle('editors-hidden')
   ;(event.currentTarget as HTMLButtonElement).textContent = document.body.classList.contains('editors-hidden') ? 'MOSTRAR EDITORES' : 'OCULTAR EDITORES'
