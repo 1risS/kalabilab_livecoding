@@ -66,10 +66,44 @@ osc(20, 0.1)
   .out()
 ```
 
+### Control de video
+
+Al subir un video, `s0` se reproduce en bucle. Estas funciones controlan el video cargado sin interferir con las funciones propias de Hydra:
+
+```js
+videoLoop(0.2, 0.75) // reproduce repetidamente del 20 % al 75 % del video
+videoSpeed(0.5)      // media velocidad, con frame blending automático
+videoSpeed(-1)       // reproducción inversa
+videoSpeed(-2)       // reproducción inversa al doble de velocidad
+videoSpeed(0)        // pausa
+videoSpeed([-1, 1])  // alterna entre reversa y avance cada segundo
+videoSpeed(() => [-1, 1]) // lo mismo, calculado en tiempo de ejecución
+videoChop(4, 2)      // alterna 4 segmentos del video, 2 veces por segundo
+videoChop(() => [4, 16], 2) // alterna dinámicamente entre 4 y 16 segmentos
+videoChop([4, 16], () => [1, 8]) // segmentos y velocidad variables
+chop(4, 2)           // alias encadenable de videoChop() para fuentes de video
+videoChop(0)         // desactiva el corte temporal
+```
+
+Los límites de `videoLoop(inicio, final)` se expresan de `0` a `1`. Las funciones se aplican al último video subido en `s0`.
+
+Cuando un video avanza a una velocidad positiva menor que `1`, Kalabi mezcla temporalmente el fotograma actual con el anterior. Esto suaviza los fotogramas repetidos que producen los decodificadores a velocidades lentas. El efecto se reinicia al hacer `chop()`, cambiar el bucle o reproducir en reversa, para no dejar rastros entre cortes.
+También pueden encadenarse en una fuente Hydra:
+
+```js
+src(s0)
+  .videoLoop(0.2, 0.75)
+  .videoSpeed(-1)
+  .chop(8, 4)
+  .out()
+```
+
 ## Puente Strudel → Hydra
 
 - `a.fft`: 32 bandas FFT normalizadas, actualizadas en cada cuadro de animación.
 - `a.vol`: energía media normalizada, de 0 a 1.
+- `a.orbit(n)`: análisis de un bus/orbit de Strudel. Devuelve su propia energía (`vol`) y bandas (`fft`) después de sus efectos. El análisis se actualiza 20 veces por segundo. El orbit por defecto de Strudel es `1`.
+- `a.orbits`: los orbits que ya se usaron, indexados por número.
 - `strudel.last`: último evento disparado por Strudel (`value`, `time`, `cps` y `duration` opcional).
 - `strudel.events`: los 32 eventos más recientes.
 - `strudel.cps`: ciclos por segundo del último evento.
@@ -77,3 +111,30 @@ osc(20, 0.1)
 - También están disponibles las variables globales habituales de Hydra: `osc`, `shape`, `noise`, `src`, `solid`, `render`, `a`, `a0`–`a31` y `o0`–`o3`.
 
 El puente usa las APIs `initStrudel`, `evaluate`, `getAudioContext`, `getSuperdoughAudioController` y `onTrigger` de Strudel. El análisis toma la señal de salida de Strudel y no solicita permiso de micrófono.
+
+### Reactividad por orbit
+
+Asigná cada patrón a un orbit de Strudel y leé ese canal en Hydra. Así un bombo puede afectar una escala y los hats otro parámetro, sin reaccionar a la mezcla completa:
+
+```js
+// Strudel
+stack(
+  s("bd*4").orbit(0),
+  s("hh*8").orbit(1),
+  note("<c2 eb2 g2 bb2>").s("sawtooth").orbit(2)
+)
+```
+
+```js
+// Hydra
+const kick = a.orbit(0)
+const hats = a.orbit(1)
+const synth = a.orbit(2)
+
+osc(8, 0.05, () => 0.15 + hats.fft[3] * 2)
+  .rotate(() => kick.vol * 0.25)
+  .scale(() => 0.9 + synth.vol * 0.2)
+  .out()
+```
+
+Llamá a `a.orbit(n)` después de ejecutar un patrón que use `.orbit(n)`. Si el patrón se evalúa de nuevo, las referencias `kick`, `hats` y `synth` continúan actualizándose.

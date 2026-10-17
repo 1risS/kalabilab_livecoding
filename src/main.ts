@@ -12,7 +12,228 @@ const HYDRA_DEMO = `osc(20, 0.1, () => 0.3 + a.fft[0] * 3)\n  .kaleid(4)\n  .out
 const assetBase = import.meta.env.BASE_URL
 type Pane = 'strudel' | 'hydra'
 type StrudelEvent = { value: Record<string, unknown>; time: number; cps: number; duration?: number }
+type AudioAnalysis = {
+  fft: number[]
+  vol: number
+  scale: number
+  cutoff: number
+  smooth: number
+  setBins: (numBins: number) => void
+  setSmooth: (value: number) => void
+  setScale: (value: number) => void
+  setCutoff: (value: number) => void
+}
+type OrbitAnalysis = AudioAnalysis & { orbit: number }
+type OrbitTap = { analyser: AnalyserNode; sink: GainNode; analysis: OrbitAnalysis }
 
+let uploadedVideo: HTMLVideoElement | undefined
+let videoLoopStart = 0
+let videoLoopEnd = 1
+let videoPlaybackSpeed = 1
+let videoSpeedControl: unknown = 1
+let videoChopSlices = 0
+let videoChopRate = 1
+let videoChopSlicesControl: unknown = 0
+let videoChopRateControl: unknown = 1
+let activeVideoChop = -1
+let reverseVideoFrame: number | undefined
+let previousVideoFrame = 0
+let videoSeekPending = false
+const videoFrameCanvas = document.createElement('canvas')
+const previousVideoFrameCanvas = document.createElement('canvas')
+let hasPreviousVideoFrame = false
+function strudelOutputGain() {
+  return (getSuperdoughAudioController() as any).output?.destinationGain as GainNode | undefined
+}
+function restoreStrudelOutput() {
+  const output = strudelOutputGain()
+  if (!output) return
+  const now = output.context.currentTime
+  output.gain.cancelScheduledValues(now)
+  output.gain.setValueAtTime(1, now)
+}
+function stopStrudel() {
+  hush()
+  // `hush()` stops future scheduler events, but a long AudioBufferSourceNode
+  // already triggered by a sample is allowed to finish. Mute the master bus as
+  // a short panic fade so Cmd+. has SuperCollider-like immediate behaviour.
+  const output = strudelOutputGain()
+  if (!output) return
+  const now = output.context.currentTime
+  output.gain.cancelScheduledValues(now)
+  output.gain.setTargetAtTime(0, now, 0.005)
+  document.querySelector('#audio-status')!.textContent = 'SILENCIADO'
+}
+function clampUnit(value: number) { return Math.max(0, Math.min(1, value)) }
+function resetVideoFrameBlend() {
+  hasPreviousVideoFrame = false
+  videoFrameCanvas.getContext('2d')?.clearRect(0, 0, videoFrameCanvas.width, videoFrameCanvas.height)
+  previousVideoFrameCanvas.getContext('2d')?.clearRect(0, 0, previousVideoFrameCanvas.width, previousVideoFrameCanvas.height)
+}
+function updateVideoFrameBlend() {
+  const video = uploadedVideo
+  if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+  const width = video.videoWidth
+  const height = video.videoHeight
+  if (!width || !height) return
+  if (videoFrameCanvas.width !== width || videoFrameCanvas.height !== height) {
+    videoFrameCanvas.width = previousVideoFrameCanvas.width = width
+    videoFrameCanvas.height = previousVideoFrameCanvas.height = height
+    hasPreviousVideoFrame = false
+  }
+  const output = videoFrameCanvas.getContext('2d')
+  const previous = previousVideoFrameCanvas.getContext('2d')
+  if (!output || !previous) return
+  output.globalAlpha = 1
+  output.clearRect(0, 0, width, height)
+  // Native video decoders repeat source frames at slow speeds. Blend the last
+  // rendered frame with the current decoded frame so forward playback below 1x
+  // has a continuous temporal trail rather than a sequence of hard holds.
+  const shouldBlend = videoPlaybackSpeed > 0 && videoPlaybackSpeed < 1
+  if (shouldBlend && hasPreviousVideoFrame) {
+    output.globalAlpha = 1 - videoPlaybackSpeed
+    output.drawImage(previousVideoFrameCanvas, 0, 0, width, height)
+    output.globalAlpha = videoPlaybackSpeed
+  }
+  output.drawImage(video, 0, 0, width, height)
+  output.globalAlpha = 1
+  previous.clearRect(0, 0, width, height)
+  previous.drawImage(videoFrameCanvas, 0, 0, width, height)
+  hasPreviousVideoFrame = shouldBlend
+}
+function stopReverseVideo() {
+  if (reverseVideoFrame !== undefined) cancelAnimationFrame(reverseVideoFrame)
+  reverseVideoFrame = undefined
+}
+function videoBounds(video: HTMLVideoElement) {
+  const duration = video.duration
+  if (!Number.isFinite(duration) || duration <= 0) return null
+  return { start: duration * videoLoopStart, end: duration * videoLoopEnd }
+}
+function seekVideo(video: HTMLVideoElement, time: number) {
+  if (videoSeekPending || Math.abs(video.currentTime - time) < 0.012) return false
+  videoSeekPending = true
+  resetVideoFrameBlend()
+  if (typeof video.fastSeek === 'function') video.fastSeek(time)
+  else video.currentTime = time
+  // Some browser/video combinations omit `seeked` for a seek to a nearby keyframe.
+  window.setTimeout(() => { videoSeekPending = false }, 250)
+  return true
+}
+function keepVideoWithinLoop() {
+  const video = uploadedVideo
+  const bounds = video && videoBounds(video)
+  if (!video || !bounds) return
+  const sliceLength = videoChopSlices > 0 ? (bounds.end - bounds.start) / videoChopSlices : 0
+  const chopStart = videoChopSlices > 0 ? bounds.start + activeVideoChop * sliceLength : bounds.start
+  const chopEnd = videoChopSlices > 0 ? chopStart + sliceLength : bounds.end
+  if (videoPlaybackSpeed >= 0 && video.currentTime >= chopEnd - 0.008) seekVideo(video, chopStart)
+  if (videoPlaybackSpeed < 0 && video.currentTime <= chopStart + 0.008) seekVideo(video, chopEnd)
+}
+function playVideoInReverse(now: number) {
+  const video = uploadedVideo
+  const bounds = video && videoBounds(video)
+  if (!video || !bounds || videoPlaybackSpeed >= 0) return
+  const elapsed = previousVideoFrame ? (now - previousVideoFrame) / 1000 : 0
+  previousVideoFrame = now
+  const nextTime = video.currentTime - elapsed * Math.abs(videoPlaybackSpeed)
+  seekVideo(video, nextTime <= bounds.start ? bounds.end : nextTime)
+  reverseVideoFrame = requestAnimationFrame(playVideoInReverse)
+}
+function setVideoLoop(start = 0, end = 1) {
+  if (!uploadedVideo) throw new Error('Primero subí un video para usar videoLoop().')
+  const normalizedStart = clampUnit(start)
+  const normalizedEnd = clampUnit(end)
+  if (normalizedStart >= normalizedEnd) throw new Error('videoLoop(inicio, final) requiere que inicio sea menor que final.')
+  videoLoopStart = normalizedStart
+  videoLoopEnd = normalizedEnd
+  const bounds = videoBounds(uploadedVideo)
+  if (bounds) seekVideo(uploadedVideo, videoPlaybackSpeed < 0 ? bounds.end : bounds.start)
+}
+function resolveVideoSpeed(control: unknown) {
+  let value = typeof control === 'function' ? control() : control
+  // Hydra-style arrays cycle once per second. This allows `[-1, 1]` and
+  // functions returning arrays to drive forward/reverse motion.
+  if (Array.isArray(value)) value = value[Math.floor(performance.now() / 1000) % value.length]
+  if (value && typeof value === 'object' && 'value' in value) value = (value as { value: unknown }).value
+  const speed = Number(value)
+  if (!Number.isFinite(speed)) throw new Error('videoSpeed() requiere un número, un arreglo de números o una función que los devuelva.')
+  return speed
+}
+function applyVideoSpeed(speed: number) {
+  // Browsers reject very small positive `playbackRate` values (Chrome's lower
+  // bound is commonly 0.0625). Audio-reactive expressions often cross that
+  // range while changing direction, so reserve 0 for an explicit pause and
+  // clamp every nonzero speed to a safe magnitude.
+  const minimumSpeed = 0.1
+  const maximumSpeed = 4
+  if (speed !== 0 && Math.abs(speed) < minimumSpeed) speed = Math.sign(speed || 1) * minimumSpeed
+  speed = Math.max(-maximumSpeed, Math.min(maximumSpeed, speed))
+  if (!uploadedVideo || speed === videoPlaybackSpeed) return
+  if (!uploadedVideo) throw new Error('Primero subí un video para usar videoSpeed().')
+  videoPlaybackSpeed = speed
+  stopReverseVideo()
+  if (speed === 0) {
+    uploadedVideo.pause()
+    return
+  }
+  if (speed > 0) {
+    uploadedVideo.playbackRate = speed
+    void uploadedVideo.play()
+    return
+  }
+  uploadedVideo.pause()
+  previousVideoFrame = 0
+  reverseVideoFrame = requestAnimationFrame(playVideoInReverse)
+}
+function setVideoSpeed(control: unknown = 1) {
+  if (!uploadedVideo) throw new Error('Primero subí un video para usar videoSpeed().')
+  videoSpeedControl = control
+  applyVideoSpeed(resolveVideoSpeed(control))
+}
+function resolveVideoChopValue(control: unknown, label: 'segmentos' | 'velocidad') {
+  let value = typeof control === 'function' ? control() : control
+  if (Array.isArray(value)) value = value[Math.floor(performance.now() / 1000) % value.length]
+  if (value && typeof value === 'object' && 'value' in value) value = (value as { value: unknown }).value
+  const number = Number(value)
+  if (!Number.isFinite(number)) throw new Error(`videoChop(${label}) requiere un número, un arreglo de números o una función que los devuelva.`)
+  return number
+}
+function setVideoChop(slices: unknown = 4, rate: unknown = 2) {
+  if (!uploadedVideo) throw new Error('Primero subí un video para usar videoChop().')
+  videoChopSlicesControl = slices
+  videoChopRateControl = rate
+  updateVideoChop()
+}
+function updateVideoChop() {
+  const slices = Math.floor(resolveVideoChopValue(videoChopSlicesControl, 'segmentos'))
+  const rate = resolveVideoChopValue(videoChopRateControl, 'velocidad')
+  if (slices < 0) throw new Error('videoChop(segmentos) requiere una cantidad mayor o igual a 0.')
+  if (rate <= 0) throw new Error('videoChop(velocidad) requiere una velocidad mayor que 0.')
+  if (slices !== videoChopSlices) activeVideoChop = -1
+  videoChopSlices = slices
+  videoChopRate = rate
+  if (!uploadedVideo || videoChopSlices === 0) return
+  const bounds = videoBounds(uploadedVideo)
+  if (!bounds) return
+  const slice = Math.floor(performance.now() / 1000 * videoChopRate) % videoChopSlices
+  if (slice === activeVideoChop) return
+  activeVideoChop = slice
+  const sliceLength = (bounds.end - bounds.start) / videoChopSlices
+  seekVideo(uploadedVideo, videoPlaybackSpeed < 0
+    ? bounds.start + (slice + 1) * sliceLength
+    : bounds.start + slice * sliceLength)
+}
+function installVideoControls() {
+  const source = (globalThis as Record<string, any>).src?.((globalThis as Record<string, any>).s0)
+  const prototype = source && Object.getPrototypeOf(source)
+  if (!prototype || prototype.__kalabiVideoControls) return
+  prototype.videoLoop = function (start = 0, end = 1) { setVideoLoop(start, end); return this }
+  prototype.videoSpeed = function (speed = 1) { setVideoSpeed(speed); return this }
+  prototype.videoChop = function (slices = 4, rate = 2) { setVideoChop(slices, rate); return this }
+  prototype.chop = function (slices = 4, rate = 2) { setVideoChop(slices, rate); return this }
+  prototype.__kalabiVideoControls = true
+}
 const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
 <div class="start-screen" id="start-screen"><div><img src="${assetBase}logo-kalabi.webp" alt="Símbolo Kalabi Lab"><strong>HAZ CLIC PARA INICIAR AUDIO + VIDEO</strong><small>EL NAVEGADOR REQUIERE UNA ACCIÓN DEL USUARIO</small></div></div>
@@ -29,18 +250,74 @@ const saved = (key: string, fallback: string, shareKey: 's' | 'h') => sharedCode
 let hydra: Hydra
 let hydraInitialized = false
 let analyser: AnalyserNode | undefined
+let analyserSink: GainNode | undefined
+let orbitAnalysisTime = 0
 let strudelReady = false
 let recorder: MediaRecorder | undefined
 let recordingStream: MediaStream | undefined
 let latestEvent: StrudelEvent | null = null
 const events: StrudelEvent[] = []
 const listeners = new Set<(event: StrudelEvent) => void>()
+const orbitTaps = new Map<number, OrbitTap>()
+const orbitAnalyses = new Map<number, OrbitAnalysis>()
+
+function createAudioAnalysis(): AudioAnalysis {
+  return {
+    fft: Array(32).fill(0),
+    vol: 0,
+    scale: 1,
+    cutoff: 0,
+    smooth: 0.75,
+    setBins(numBins: number) { this.fft = Array(Math.max(1, Math.floor(numBins))).fill(0) },
+    setSmooth(value: number) { this.smooth = clampUnit(value) },
+    setScale(value: number) { this.scale = Math.max(0, value) },
+    setCutoff(value: number) { this.cutoff = Math.max(0, value) },
+  }
+}
+function updateAnalysis(analysis: AudioAnalysis, node: AnalyserNode) {
+  const spectrum = new Uint8Array(node.frequencyBinCount)
+  const waveform = new Float32Array(node.fftSize)
+  node.getByteFrequencyData(spectrum)
+  node.getFloatTimeDomainData(waveform)
+  analysis.fft = analysis.fft.map((previous, index) => {
+    const raw = (spectrum[Math.floor(index * spectrum.length / analysis.fft.length)] ?? 0) / 255
+    const scaled = Math.max(0, raw * analysis.scale - analysis.cutoff)
+    return previous * analysis.smooth + scaled * (1 - analysis.smooth)
+  })
+  const rms = Math.sqrt(waveform.reduce((sum, sample) => sum + sample * sample, 0) / waveform.length)
+  const level = Math.min(1, rms * analysis.scale)
+  analysis.vol = analysis.vol * analysis.smooth + level * (1 - analysis.smooth)
+}
+function ensureOrbitTap(orbit: number): OrbitAnalysis {
+  const existing = orbitTaps.get(orbit)
+  if (existing) return existing.analysis
+  let analysis = orbitAnalyses.get(orbit)
+  if (!analysis) {
+    analysis = Object.assign(createAudioAnalysis(), { orbit })
+    orbitAnalyses.set(orbit, analysis)
+  }
+  const controller = getSuperdoughAudioController() as any
+  const output = controller.nodes?.[orbit]?.output as AudioNode | undefined
+  if (!output) return analysis
+  const context = getAudioContext()
+  const analyser = context.createAnalyser()
+  analyser.fftSize = 256
+  // Keep the analyser in an active audio path without adding a second audible
+  // copy of the orbit. The orbit remains routed normally by SuperDough.
+  const sink = context.createGain()
+  sink.gain.value = 0
+  output.connect(analyser)
+  analyser.connect(sink)
+  sink.connect(context.destination)
+  orbitTaps.set(orbit, { analyser, sink, analysis })
+  return analysis
+}
 
 function makeEditor(parent: string, value: string, onEvaluate: () => void) {
   const liveCodingKeys = keymap.of([
     { key: 'Mod-Enter', run: () => { onEvaluate(); return true } },
     { key: 'Ctrl-Enter', run: () => { onEvaluate(); return true } },
-    { key: 'Mod-.', run: () => { hush(); return true } },
+    { key: 'Mod-.', run: () => { stopStrudel(); return true } },
   ])
   return new EditorView({ state: EditorState.create({ doc: value, extensions: [basicSetup, javascript(), Prec.highest(liveCodingKeys), keymap.of([...defaultKeymap, indentWithTab]), EditorView.updateListener.of((update) => { if (update.docChanged) localStorage.setItem(`kalabi-${parent}`, update.state.doc.toString()) })] }), parent: document.querySelector(`#${parent}-editor`)! })
 }
@@ -55,6 +332,7 @@ function emit(event: StrudelEvent) { latestEvent = event; events.push(event); if
 async function evaluateStrudel(view: EditorView) {
   try {
     clearError('strudel'); await initAudioBridge(); await getAudioContext().resume()
+    restoreStrudelOutput()
     initializeHydra()
     const result = await evaluate(view.state.doc.toString())
     // Strudel patterns expose onTrigger; this forwards each scheduled hit to Hydra.
@@ -68,17 +346,19 @@ async function evaluateStrudel(view: EditorView) {
 function installBridge() {
   // Hydra normally creates `a` only when microphone detection is enabled. We
   // disable that permission prompt and provide the same public shape ourselves.
-  const audio = {
-    fft: Array(32).fill(0),
-    vol: 0,
-    scale: 1,
-    cutoff: 0,
-    smooth: 0.75,
-    setBins(numBins: number) { this.fft = Array(numBins).fill(0) },
-    setSmooth(value: number) { this.smooth = value },
-    setScale(value: number) { this.scale = value },
-    setCutoff(value: number) { this.cutoff = value },
-  }
+  const audio = Object.assign(createAudioAnalysis(), {
+    // Strudel's `orbit(n)` is a real SuperDough bus. Its analyser is attached
+    // after that orbit's post-effects, so it represents that pattern/channel
+    // rather than the master mix. It is updated at 20 Hz.
+    orbit(number = 1) {
+      const orbit = Math.floor(Number(number))
+      if (!Number.isFinite(orbit) || orbit < 0) throw new Error('a.orbit(n) requiere un número entero mayor o igual a 0.')
+      return ensureOrbitTap(orbit)
+    },
+    get orbits() {
+      return Object.fromEntries([...orbitAnalyses])
+    },
+  })
   const synth = (hydra as unknown as { synth: Record<string, unknown> }).synth
   synth.a = audio
   ;(globalThis as Record<string, unknown>).a = audio
@@ -94,7 +374,13 @@ async function initAudioBridge() {
     const output = (getSuperdoughAudioController() as any).output?.destinationGain
     if (!output) throw new Error('Strudel audio output is unavailable')
     output.connect(node)
-    node.connect(context.destination)
+    // Keep this analysis branch alive but silent. Connecting it directly to
+    // `destination` creates a second, differently-routed copy of the mix and
+    // can collapse/duplicate the stereo signal in headphones.
+    analyserSink = context.createGain()
+    analyserSink.gain.value = 0
+    node.connect(analyserSink)
+    analyserSink.connect(context.destination)
     strudelReady = true
   }
 }
@@ -128,17 +414,28 @@ function initializeHydra() {
   ;(globalThis as Record<string, unknown>).global = globalThis
   hydra = new Hydra({ canvas, detectAudio: false, makeGlobal: true })
   ;(globalThis as Record<string, unknown>).H = hydra
+  ;(globalThis as Record<string, unknown>).videoLoop = setVideoLoop
+  ;(globalThis as Record<string, unknown>).videoSpeed = setVideoSpeed
+  ;(globalThis as Record<string, unknown>).videoChop = setVideoChop
+  installVideoControls()
   installBridge()
   hydraInitialized = true
   runHydra(hydraView)
 }
 function updateAudioBridge() {
-  if (analyser && hydraInitialized) {
-    const data = new Uint8Array(analyser.frequencyBinCount)
-    analyser.getByteFrequencyData(data)
-    const audio = (hydra as unknown as { synth: { a: { fft: number[]; vol: number } } }).synth.a
-    audio.fft = audio.fft.map((_, index) => (data[Math.floor(index * data.length / audio.fft.length)] ?? 0) / 255)
-    audio.vol = audio.fft.reduce((sum, value) => sum + value, 0) / audio.fft.length
+  updateVideoChop()
+  keepVideoWithinLoop()
+  if (uploadedVideo) {
+    try { applyVideoSpeed(resolveVideoSpeed(videoSpeedControl)) } catch (error) { console.error('[Hydra]', error) }
+    updateVideoFrameBlend()
+  }
+  if (analyser && hydraInitialized && performance.now() - orbitAnalysisTime >= 50) {
+    orbitAnalysisTime = performance.now()
+    const audio = (hydra as unknown as { synth: { a: AudioAnalysis } }).synth.a
+    updateAnalysis(audio, analyser)
+    const controller = getSuperdoughAudioController() as any
+    Object.keys(controller.nodes ?? {}).forEach((number) => ensureOrbitTap(Number(number)))
+    orbitTaps.forEach((tap) => updateAnalysis(tap.analysis, tap.analyser))
   }
   requestAnimationFrame(updateAudioBridge)
 }
@@ -176,7 +473,7 @@ async function uploadVisual(file: File | undefined, kind: 'imagen' | 'video') {
     } else {
       const video = document.createElement('video')
       video.autoplay = true
-      video.loop = true
+      video.loop = false
       video.muted = true
       video.playsInline = true
       await new Promise<void>((resolve, reject) => {
@@ -185,7 +482,29 @@ async function uploadVisual(file: File | undefined, kind: 'imagen' | 'video') {
         video.src = url
       })
       await video.play()
-      source.init({ src: video, dynamic: true })
+      stopReverseVideo()
+      uploadedVideo = video
+      videoLoopStart = 0
+      videoLoopEnd = 1
+      videoPlaybackSpeed = 1
+      videoSpeedControl = 1
+      videoChopSlices = 0
+      videoChopSlicesControl = 0
+      videoChopRateControl = 1
+      activeVideoChop = -1
+      videoSeekPending = false
+      resetVideoFrameBlend()
+      video.addEventListener('timeupdate', keepVideoWithinLoop)
+      video.addEventListener('seeked', () => { videoSeekPending = false })
+      video.addEventListener('ended', () => {
+        const bounds = videoBounds(video)
+        if (!bounds) return
+        video.currentTime = bounds.start
+        void video.play()
+      })
+      // Feed Hydra a canvas that blends adjacent decoded frames below 1x.
+      // The canvas is redrawn every animation frame by `updateAudioBridge()`.
+      source.init({ src: videoFrameCanvas, dynamic: true })
     }
     document.querySelector('#visual-status')!.textContent = `${kind.toUpperCase()} EN s0`
   } catch (error) { showError('hydra', error) }
