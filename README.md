@@ -36,7 +36,7 @@ La botonera permite:
 - **Subir samples:** carga archivos de audio locales. Se registran con un identificador basado en el nombre del archivo y pueden usarse con `s("nombre-del-sample")`.
 - **Subir imagen:** carga una imagen en la fuente Hydra `s0`.
 - **Subir video:** carga un video en `s0`, en bucle y sin audio.
-- **Gists:** publica los programas actuales como un Gist privado de GitHub. Solicita un token clásico de GitHub con permiso `gist` y no lo guarda.
+- **Copiar código:** copia los programas actuales de Strudel y Hydra al portapapeles, identificados como `strudel.js` y `hydra.js`, para pegarlos manualmente en un Gist de GitHub u otro editor.
 - **Ocultar editores:** deja visible la visual de Hydra como fondo.
 - **Pantalla completa:** activa el modo de pantalla completa del navegador.
 

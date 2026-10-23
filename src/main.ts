@@ -238,7 +238,7 @@ const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
 <div class="start-screen" id="start-screen"><div><img src="${assetBase}logo-kalabi.webp" alt="Símbolo Kalabi Lab"><strong>HAZ CLIC PARA INICIAR AUDIO + VIDEO</strong><small>EL NAVEGADOR REQUIERE UNA ACCIÓN DEL USUARIO</small></div></div>
 <canvas id="hydra-canvas" aria-label="Visual de Hydra"></canvas>
-<header class="topbar"><div class="brand"><img src="${assetBase}logo-kalabi.webp" alt="Kalabi Lab"><div><b>kalabi lab</b><em>FORMACIÓN EN ARTE, TECNOLOGÍA Y MATERIA</em></div></div><nav class="toolbar"><button id="run-all" class="accent run-all">EJECUTAR</button><button id="upload-samples">SUBIR SAMPLES</button><button id="upload-image">SUBIR IMAGEN</button><button id="upload-video">SUBIR VIDEO</button><button id="record">GRABAR MP4</button><button id="gist">GISTS</button><button id="toggle-editors">OCULTAR EDITORES</button><button id="fullscreen">PANTALLA COMPLETA</button></nav></header>
+<header class="topbar"><div class="brand"><img src="${assetBase}logo-kalabi.webp" alt="Kalabi Lab"><div><b>kalabi lab</b><em>FORMACIÓN EN ARTE, TECNOLOGÍA Y MATERIA</em></div></div><nav class="toolbar"><button id="run-all" class="accent run-all">EJECUTAR</button><button id="upload-samples">SUBIR SAMPLES</button><button id="upload-image">SUBIR IMAGEN</button><button id="upload-video">SUBIR VIDEO</button><button id="record">GRABAR MP4</button><button id="copy-code">COPIAR CÓDIGO</button><button id="toggle-editors">OCULTAR EDITORES</button><button id="fullscreen">PANTALLA COMPLETA</button></nav></header>
 <input id="samples-input" type="file" accept="audio/*" multiple hidden><input id="image-input" type="file" accept="image/*" hidden><input id="video-input" type="file" accept="video/*" hidden>
 <main id="workbench"><section class="pane" id="strudel-pane"><div class="pane-head"><b>01 / STRUDEL</b><span id="audio-status">LISTO</span></div><div class="editor" id="strudel-editor"></div><pre class="errors" id="strudel-errors"></pre></section><div class="divider" id="divider" role="separator" aria-label="Cambiar el tamaño de los editores"></div><section class="pane hydra-pane" id="hydra-pane"><div class="pane-head"><b>02 / HYDRA</b><span id="visual-status">LISTO</span></div><div class="editor" id="hydra-editor"></div><pre class="errors" id="hydra-errors"></pre></section></main>`
 
@@ -509,15 +509,17 @@ async function uploadVisual(file: File | undefined, kind: 'imagen' | 'video') {
     document.querySelector('#visual-status')!.textContent = `${kind.toUpperCase()} EN s0`
   } catch (error) { showError('hydra', error) }
 }
-async function createGist() {
-  const token = window.prompt('Pegá un token clásico de GitHub con permiso “gist”. No se guardará.')
-  if (!token) return
+async function copyCode() {
+  const code = `// strudel.js\n\n${strudelView.state.doc.toString()}\n\n\n// hydra.js\n\n${hydraView.state.doc.toString()}\n`
+  const button = document.querySelector<HTMLButtonElement>('#copy-code')!
   try {
-    const response = await fetch('https://api.github.com/gists', { method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'Kalabi live coding session', public: false, files: { 'strudel.js': { content: strudelView.state.doc.toString() }, 'hydra.js': { content: hydraView.state.doc.toString() } } }) })
-    if (!response.ok) throw new Error(`GitHub respondió ${response.status}: ${await response.text()}`)
-    const gist = await response.json() as { html_url: string }
-    window.open(gist.html_url, '_blank', 'noopener')
-  } catch (error) { console.error('[Gists]', error); window.alert(`No se pudo crear el Gist: ${error instanceof Error ? error.message : String(error)}`) }
+    await navigator.clipboard.writeText(code)
+    button.textContent = 'CÓDIGO COPIADO'
+    window.setTimeout(() => { button.textContent = 'COPIAR CÓDIGO' }, 1800)
+  } catch (error) {
+    console.error('[Portapapeles]', error)
+    window.alert('No se pudo acceder al portapapeles. Revisá que el sitio use HTTPS y permití el acceso al portapapeles en el navegador.')
+  }
 }
 function supportedRecordingMimeType() {
   return ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
@@ -570,7 +572,7 @@ document.querySelector('#upload-video')!.addEventListener('click', () => documen
 document.querySelector('#samples-input')!.addEventListener('change', (event) => uploadSamples((event.currentTarget as HTMLInputElement).files))
 document.querySelector('#image-input')!.addEventListener('change', (event) => uploadVisual((event.currentTarget as HTMLInputElement).files?.[0], 'imagen'))
 document.querySelector('#video-input')!.addEventListener('change', (event) => uploadVisual((event.currentTarget as HTMLInputElement).files?.[0], 'video'))
-document.querySelector('#gist')!.addEventListener('click', () => createGist())
+document.querySelector('#copy-code')!.addEventListener('click', () => void copyCode())
 document.querySelector('#record')!.addEventListener('click', () => void toggleRecording())
 document.querySelector('#toggle-editors')!.addEventListener('click', (event) => {
   document.body.classList.toggle('editors-hidden')
