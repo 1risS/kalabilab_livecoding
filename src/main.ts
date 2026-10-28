@@ -238,8 +238,8 @@ const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
 <div class="start-screen" id="start-screen"><div><img src="${assetBase}logo-kalabi.webp" alt="Símbolo Kalabi Lab"><strong>HAZ CLIC PARA INICIAR AUDIO + VIDEO</strong><small>EL NAVEGADOR REQUIERE UNA ACCIÓN DEL USUARIO</small></div></div>
 <canvas id="hydra-canvas" aria-label="Visual de Hydra"></canvas>
-<header class="topbar"><div class="brand"><img src="${assetBase}logo-kalabi.webp" alt="Kalabi Lab"><div><b>kalabi lab</b><em>FORMACIÓN EN ARTE, TECNOLOGÍA Y MATERIA</em></div></div><nav class="toolbar"><button id="run-all" class="accent run-all">EJECUTAR</button><button id="upload-samples">SUBIR SAMPLES</button><button id="upload-image">SUBIR IMAGEN</button><button id="upload-video">SUBIR VIDEO</button><button id="record">GRABAR MP4</button><button id="copy-code">COPIAR CÓDIGO</button><button id="toggle-editors">OCULTAR EDITORES</button><button id="fullscreen">PANTALLA COMPLETA</button></nav></header>
-<input id="samples-input" type="file" accept="audio/*" multiple hidden><input id="image-input" type="file" accept="image/*" hidden><input id="video-input" type="file" accept="video/*" hidden>
+<header class="topbar"><div class="brand"><img src="${assetBase}logo-kalabi.webp" alt="Kalabi Lab"><div><b>kalabi lab</b><em>FORMACIÓN EN ARTE, TECNOLOGÍA Y MATERIA</em></div></div><nav class="toolbar"><button id="run-all" class="accent run-all">EJECUTAR</button><button id="upload-samples">SUBIR SAMPLES</button><button id="upload-image">SUBIR IMAGEN</button><button id="upload-video">SUBIR VIDEO</button><button id="record">GRABAR MP4</button><button id="copy-code">COPIAR CÓDIGO</button><button id="toggle-editors">OCULTAR EDITORES</button><button id="fullscreen" class="icon-button" type="button" aria-label="Entrar en pantalla completa" aria-pressed="false" title="Pantalla completa"><svg class="fullscreen-icon fullscreen-icon--enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><svg class="fullscreen-icon fullscreen-icon--exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M4 15h5v5M20 15h-5v5"/></svg></button></nav></header>
+<input id="samples-input" type="file" accept="audio/*" multiple webkitdirectory hidden><input id="image-input" type="file" accept="image/*" hidden><input id="video-input" type="file" accept="video/*" hidden>
 <main id="workbench"><section class="pane" id="strudel-pane"><div class="pane-head"><b>01 / STRUDEL</b><span id="audio-status">LISTO</span></div><div class="editor" id="strudel-editor"></div><pre class="errors" id="strudel-errors"></pre></section><div class="divider" id="divider" role="separator" aria-label="Cambiar el tamaño de los editores"></div><section class="pane hydra-pane" id="hydra-pane"><div class="pane-head"><b>02 / HYDRA</b><span id="visual-status">LISTO</span></div><div class="editor" id="hydra-editor"></div><pre class="errors" id="hydra-errors"></pre></section></main>`
 
 function sharedCode(key: 's' | 'h') {
@@ -328,9 +328,24 @@ function showError(pane: Pane, error: unknown) {
 }
 function clearError(pane: Pane) { document.querySelector<HTMLElement>(`#${pane}-errors`)!.textContent = '' }
 function emit(event: StrudelEvent) { latestEvent = event; events.push(event); if (events.length > 32) events.shift(); listeners.forEach((listener) => listener(event)) }
+const executionHighlightTimers = new WeakMap<HTMLElement, number>()
+function highlightExecution(view: EditorView) {
+  const editor = view.dom
+  const previousTimer = executionHighlightTimers.get(editor)
+  if (previousTimer) window.clearTimeout(previousTimer)
+  editor.classList.remove('is-executing')
+  // Restart the animation for each evaluation, including rapid live-coding runs.
+  void editor.offsetWidth
+  editor.classList.add('is-executing')
+  executionHighlightTimers.set(editor, window.setTimeout(() => {
+    editor.classList.remove('is-executing')
+    executionHighlightTimers.delete(editor)
+  }, 720))
+}
 
 async function evaluateStrudel(view: EditorView) {
   try {
+    highlightExecution(view)
     clearError('strudel'); await initAudioBridge(); await getAudioContext().resume()
     restoreStrudelOutput()
     initializeHydra()
@@ -386,6 +401,7 @@ async function initAudioBridge() {
 }
 function runHydra(view: EditorView) {
   try {
+    highlightExecution(view)
     initializeHydra()
     clearError('hydra')
     // Match Hydra's browser workflow: it installs its live-coding functions on
@@ -449,10 +465,34 @@ async function uploadSamples(files: FileList | null) {
   if (!files?.length) return
   try {
     await initAudioBridge()
-    const sampleMap: Record<string, string> = {}
-    for (const file of files) sampleMap[sampleName(file)] = URL.createObjectURL(file)
-    await samples(sampleMap)
-    document.querySelector('#audio-status')!.textContent = `${files.length} SAMPLE${files.length === 1 ? '' : 'S'} LISTO${files.length === 1 ? '' : 'S'}`
+    const sampleMap: Record<string, string | string[]> = {}
+    const groupedSamples = new Map<string, File[]>()
+    for (const file of files) {
+      const relativePath = file.webkitRelativePath
+      if (!relativePath) {
+        sampleMap[sampleName(file)] = URL.createObjectURL(file)
+        continue
+      }
+      const pathParts = relativePath.split('/')
+      // The selected folder may be a pack with subfolders. Each folder that
+      // contains audio becomes its own Strudel sound bank: `s("folder:0")`.
+      const folder = pathParts.at(-2) || pathParts[0] || sampleName(file)
+      const collection = groupedSamples.get(folder) ?? []
+      collection.push(file)
+      groupedSamples.set(folder, collection)
+    }
+    groupedSamples.forEach((collection, folder) => {
+      sampleMap[folder] = collection
+        .sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }))
+        .map((file) => URL.createObjectURL(file))
+    })
+    // Strudel accepts a string array for a sound bank (`folder:0`, `folder:1`),
+    // though its installed TypeScript declaration only exposes single URLs.
+    await samples(sampleMap as Record<string, string>)
+    const collections = groupedSamples.size
+    document.querySelector('#audio-status')!.textContent = collections
+      ? `${collections} CARPETA${collections === 1 ? '' : 'S'} / ${files.length} SAMPLES LISTOS`
+      : `${files.length} SAMPLE${files.length === 1 ? '' : 'S'} LISTO${files.length === 1 ? '' : 'S'}`
   } catch (error) { showError('strudel', error) }
 }
 async function uploadVisual(file: File | undefined, kind: 'imagen' | 'video') {
@@ -514,7 +554,9 @@ async function copyCode() {
   const button = document.querySelector<HTMLButtonElement>('#copy-code')!
   try {
     await navigator.clipboard.writeText(code)
-    button.textContent = 'CÓDIGO COPIADO'
+    // Keep the confirmation shorter than the idle label so the toolbar does
+    // not reflow and briefly reduce the available workspace height.
+    button.textContent = 'COPIADO'
     window.setTimeout(() => { button.textContent = 'COPIAR CÓDIGO' }, 1800)
   } catch (error) {
     console.error('[Portapapeles]', error)
@@ -578,7 +620,19 @@ document.querySelector('#toggle-editors')!.addEventListener('click', (event) => 
   document.body.classList.toggle('editors-hidden')
   ;(event.currentTarget as HTMLButtonElement).textContent = document.body.classList.contains('editors-hidden') ? 'MOSTRAR EDITORES' : 'OCULTAR EDITORES'
 })
-document.querySelector('#fullscreen')!.addEventListener('click', () => document.documentElement.requestFullscreen?.())
+function syncFullscreenButton() {
+  const button = document.querySelector<HTMLButtonElement>('#fullscreen')!
+  const active = document.fullscreenElement !== null
+  button.classList.toggle('is-fullscreen', active)
+  button.setAttribute('aria-label', active ? 'Salir de pantalla completa' : 'Entrar en pantalla completa')
+  button.setAttribute('aria-pressed', String(active))
+  button.title = active ? 'Salir de pantalla completa' : 'Pantalla completa'
+}
+document.querySelector('#fullscreen')!.addEventListener('click', async () => {
+  if (document.fullscreenElement) await document.exitFullscreen?.()
+  else await document.documentElement.requestFullscreen?.()
+})
+document.addEventListener('fullscreenchange', syncFullscreenButton)
 document.querySelector('#start-screen')!.addEventListener('click', async (event) => {
   const startScreen = event.currentTarget as HTMLElement
   try {

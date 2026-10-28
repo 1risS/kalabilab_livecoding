@@ -50,6 +50,28 @@ button.accent {
   border-color: var(--sage);
   color: var(--paper);
 }
+.icon-button {
+  width: 34px;
+  min-width: 34px;
+  padding: 7px;
+  display: grid;
+  place-items: center;
+}
+.fullscreen-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: square;
+}
+.fullscreen-icon--exit,
+.icon-button.is-fullscreen .fullscreen-icon--enter {
+  display: none;
+}
+.icon-button.is-fullscreen .fullscreen-icon--exit {
+  display: block;
+}
 button.recording {
   background: #8d3130;
   border-color: #8d3130;
@@ -57,7 +79,9 @@ button.recording {
   animation: recording-pulse 1s steps(2, end) infinite;
 }
 @keyframes recording-pulse {
-  50% { opacity: 0.6; }
+  50% {
+    opacity: 0.6;
+  }
 }
 .topbar {
   min-height: 88px;
@@ -127,8 +151,7 @@ button.recording {
   display: flex;
   flex-direction: column;
   border-right: var(--line) solid var(--ink);
-  background: rgba(228, 227, 222, 0.4);
-  backdrop-filter: blur(4px);
+  background: transparent;
 }
 .hydra-pane {
   width: calc(100% - var(--left-width));
@@ -162,18 +185,41 @@ button.recording {
 .cm-editor {
   height: 100%;
   font-size: 16px;
-  background: rgba(248, 247, 245, 0.78);
+  background: transparent;
+}
+.cm-editor.is-executing .cm-line {
+  animation: execution-line-highlight 720ms ease-out;
+}
+@keyframes execution-line-highlight {
+  0% {
+    background: rgba(216, 231, 91, 0.52);
+    box-shadow: inset 3px 0 var(--acid);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 3px 0 transparent;
+  }
 }
 .cm-scroller,
 .cm-content {
   background: transparent;
 }
+.cm-line {
+  width: fit-content;
+  max-width: 100%;
+  padding-right: 0.4em;
+  background: rgba(248, 247, 245, 0.9);
+  box-shadow: 0 0 0 1px rgba(23, 23, 22, 0.08);
+}
 .cm-scroller {
   overflow: auto;
 }
 .cm-gutters {
-  background: rgba(228, 227, 222, 0.86) !important;
+  background: transparent !important;
   border-right: var(--line) solid var(--ink) !important;
+}
+.cm-gutterElement {
+  background: rgba(248, 247, 245, 0.9);
 }
 .cm-content {
   caret-color: var(--sage);
@@ -204,13 +250,13 @@ button.recording {
   z-index: 4;
 }
 .hydra-pane .editor {
-  background: rgba(248, 247, 245, 0.22);
+  background: transparent;
 }
 .hydra-pane .cm-editor {
-  background: rgba(248, 247, 245, 0.22);
+  background: transparent;
 }
 .hydra-pane .cm-gutters {
-  background: rgba(248, 247, 245, 0.52) !important;
+  background: transparent !important;
 }
 .help {
   position: absolute;
